@@ -339,4 +339,73 @@ describe("C · .env.example loads, and production stays strict", () => {
         `Comment them out instead: ${emptyAssignments.join(", ")}`,
     ).toEqual([]);
   });
+
+  /*
+   * STORAGE_ALLOW_EPHEMERAL — the deliberate exception to case 12.
+   *
+   * The escape hatch's whole value is that it is hard to reach by accident, so
+   * what is worth testing is not that it works but that **nothing else opens
+   * it**: not absence, not "false", not a plausible typo, and not the email
+   * block next door.
+   */
+  describe("the ephemeral-storage escape hatch", () => {
+    const productionWithoutStorage = () => ({
+      ...asLoaded(),
+      NODE_ENV: "production",
+      AADHAAR_PEPPER: "a".repeat(48),
+      JWT_ACCESS_SECRET: "a".repeat(48),
+      JWT_REFRESH_SECRET: "b".repeat(48),
+      EMAIL_PROVIDER: "resend",
+      EMAIL_API_KEY: "not-a-real-key",
+      EMAIL_FROM: "Rise Next <no-reply@example.com>",
+      EMAIL_REPLY_TO: "support@example.com",
+    });
+
+    it('15. "true" is the only value that lets production boot without a bucket', () => {
+      const env = loadEnv({ ...productionWithoutStorage(), STORAGE_ALLOW_EPHEMERAL: "true" });
+      expect(env.NODE_ENV).toBe("production");
+      // It boots, and it boots onto the LOCAL adapter — the honest consequence.
+      expect(storageAdapterKind(env)).toBe("local");
+    });
+
+    it("16. absent or false keeps the original refusal exactly as it was", () => {
+      // Absence is the default state and must behave as though this key had
+      // never been added — the regression that would matter most.
+      expect(() => loadEnv(productionWithoutStorage())).toThrow(
+        /Object storage configuration is required in production/,
+      );
+      expect(() =>
+        loadEnv({ ...productionWithoutStorage(), STORAGE_ALLOW_EPHEMERAL: "false" }),
+      ).toThrow(/Object storage configuration is required in production/);
+    });
+
+    it("17. a typo is a boot failure, never a silent false", () => {
+      // The failure mode this guards against: an operator sets TRUE or 1,
+      // believes storage is bridged, and gets the refusal — or worse, a
+      // permissive coercion reads "false" as true. Neither may happen quietly.
+      for (const value of ["TRUE", "True", "1", "yes", "on", ""]) {
+        expect(
+          () => loadEnv({ ...productionWithoutStorage(), STORAGE_ALLOW_EPHEMERAL: value }),
+          `STORAGE_ALLOW_EPHEMERAL=${JSON.stringify(value)} must be refused`,
+        ).toThrow(/STORAGE_ALLOW_EPHEMERAL/);
+      }
+    });
+
+    it("18. it does not weaken the email block, or anything else", () => {
+      // Scope check. The hatch is storage-only; an operator who sets it must
+      // still be told about missing mail configuration.
+      const noEmail = { ...productionWithoutStorage(), STORAGE_ALLOW_EPHEMERAL: "true" };
+      delete (noEmail as Record<string, unknown>).EMAIL_API_KEY;
+      expect(() => loadEnv(noEmail)).toThrow(/Email configuration is required in production/);
+
+      // And it must not license the development fallback outside production.
+      expect(() =>
+        loadEnv({
+          ...productionWithoutStorage(),
+          STORAGE_ALLOW_EPHEMERAL: "true",
+          JWT_REFRESH_SECRET: "a".repeat(48),
+        }),
+      ).toThrow(/JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must differ/);
+    });
+  });
 });

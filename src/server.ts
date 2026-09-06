@@ -1,5 +1,11 @@
 import { createApp } from "./app.js";
-import { emailTransport, env, missingEmailConfig } from "./config/env.js";
+import {
+  emailTransport,
+  env,
+  missingEmailConfig,
+  missingStorageConfig,
+  storageIsEphemeralInProduction,
+} from "./config/env.js";
 import { closeDb, getDb } from "./db/index.js";
 import { logger } from "./lib/logger.js";
 import { sql } from "drizzle-orm";
@@ -19,6 +25,27 @@ async function main(): Promise<void> {
     logger.warn(
       { missing: missingEmailConfig(config) },
       "Email is not configured — using the console transport. No mail will be delivered.",
+    );
+  }
+
+  /*
+   * Say out loud, on every single boot, that uploaded documents are not
+   * durable. `loadEnv` would have refused to start in this state; it started
+   * only because STORAGE_ALLOW_EPHEMERAL was set deliberately.
+   *
+   * `error` level rather than `warn`, and repeated per boot rather than logged
+   * once at configuration time, because the failure this guards against is
+   * silence: a temporary bridge that nobody can see is a permanent state
+   * waiting to be discovered by a customer whose KYC document vanished. Key
+   * names only — no credential is involved here, and the convention holds.
+   */
+  if (storageIsEphemeralInProduction(config)) {
+    logger.error(
+      { missing: missingStorageConfig(config), adapter: "local" },
+      "PRODUCTION IS RUNNING WITHOUT DURABLE OBJECT STORAGE. " +
+        "STORAGE_ALLOW_EPHEMERAL=true, so document uploads use the container's " +
+        "local filesystem and WILL BE LOST on the next restart or redeploy. " +
+        "Configure the STORAGE_* keys and remove STORAGE_ALLOW_EPHEMERAL.",
     );
   }
 

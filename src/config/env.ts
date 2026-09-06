@@ -147,6 +147,48 @@ const schema = z.object({
   STORAGE_ENDPOINT: z.string().trim().min(1).optional(),
   STORAGE_SIGNED_URL_TTL_SECONDS: z.coerce.number().int().positive().max(3600).default(300),
   MAX_DOCUMENT_MB: z.coerce.number().int().positive().default(15),
+
+  /*
+   * THE ONE WAY TO BOOT PRODUCTION WITHOUT A BUCKET — and it is deliberately
+   * awkward to reach.
+   *
+   * ── WHY THIS EXISTS ─────────────────────────────────────────────────────
+   *
+   * The storage block above refuses to boot in production without all five
+   * `STORAGE_*` keys, and that rule is right: a filesystem adapter on an
+   * ephemeral container accepts a KYC upload, reports success, and loses the
+   * file on the next restart, with the database row left pointing at nothing.
+   * That is D-004's forbidden shape — a control claiming an outcome it never
+   * achieved — and it is the most expensive instance of it in this codebase.
+   *
+   * But the rule also makes NODE_ENV=production and "no S3 yet" mutually
+   * exclusive, and there is a real, temporary deployment state in between:
+   * the API is live on Railway against Neon, sending real mail, exercising
+   * every non-document workflow, while object storage is still being
+   * procured. The alternative to this key is deploying as
+   * NODE_ENV=development, which silently strips `Secure` and flips the refresh
+   * cookie to `SameSite=Lax` (SEC-028, `lib/tokens.ts`) — a security
+   * regression across the whole session layer to work around a storage gap.
+   * Trading a documented, narrow, loudly-announced storage limitation for a
+   * silent auth one is the wrong trade.
+   *
+   * ── WHY IT IS SAFE TO HAVE ──────────────────────────────────────────────
+   *
+   * It cannot be reached by accident. It has no default, so absence keeps the
+   * original refusal exactly as it was; the enum means a typo — `TRUE`, `1`,
+   * `yes` — is a boot failure rather than a value quietly read as false; and
+   * `"false"` is accepted only so that setting it explicitly OFF is
+   * expressible. Nothing infers it from another variable.
+   *
+   * It also does not go quiet once set: `server.ts` logs a `warn` on every
+   * boot naming the consequence, so this state is visible in the deployment
+   * log for as long as it lasts rather than being a one-time decision nobody
+   * can see afterwards.
+   *
+   * ⚠️ Documents uploaded while this is enabled are NOT durable. This is a
+   *    bridge to the S3 configuration, not a substitute for it.
+   */
+  STORAGE_ALLOW_EPHEMERAL: z.enum(["true", "false"]).optional(),
 });
 
 /** The email settings that must all be present before mail can be delivered. */
@@ -213,11 +255,13 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
      * Key NAMES only. Two of these are credentials.
      */
     const missingStorage = STORAGE_KEYS.filter((key) => !parsed.data[key]);
-    if (missingStorage.length > 0) {
+    if (missingStorage.length > 0 && parsed.data.STORAGE_ALLOW_EPHEMERAL !== "true") {
       throw new Error(
         `Object storage configuration is required in production. Missing: ${missingStorage.join(", ")}. ` +
           "Without it document uploads would fall back to the local filesystem adapter, " +
-          "which on an ephemeral container accepts a KYC file and then loses it.",
+          "which on an ephemeral container accepts a KYC file and then loses it. " +
+          "To deploy deliberately without durable storage while S3 is still being set up, " +
+          "set STORAGE_ALLOW_EPHEMERAL=true — uploaded documents will NOT survive a restart.",
       );
     }
   }
@@ -259,6 +303,25 @@ export function storageAdapterKind(config: Env = env()): StorageAdapterKind {
 /** The storage settings that are absent — key names only, never values. */
 export function missingStorageConfig(config: Env = env()): string[] {
   return STORAGE_KEYS.filter((key) => !config[key]);
+}
+
+/**
+ * True when production is running on the local filesystem adapter because
+ * `STORAGE_ALLOW_EPHEMERAL` was set — the state `loadEnv` would otherwise have
+ * refused to start in.
+ *
+ * Exists so the condition is named in one place and asserted by a test, rather
+ * than re-derived at the call site. `server.ts` logs it on every boot: a
+ * deliberate temporary limitation that nobody can see afterwards decays into an
+ * undocumented permanent one, and documents silently lost on restart is the
+ * expensive way to discover that happened.
+ */
+export function storageIsEphemeralInProduction(config: Env = env()): boolean {
+  return (
+    config.NODE_ENV === "production" &&
+    config.STORAGE_ALLOW_EPHEMERAL === "true" &&
+    storageAdapterKind(config) === "local"
+  );
 }
 
 export function env(): Env {
