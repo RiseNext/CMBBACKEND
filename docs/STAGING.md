@@ -96,8 +96,23 @@ Then, at minimum:
 | `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | two *different* `openssl rand -base64 48` |
 | `AADHAAR_PEPPER` | one more `openssl rand -base64 48` |
 | `CORS_ORIGIN` / `FRONTEND_URL` | `http://localhost:3000` |
-| `EMAIL_*` | **leave blank** — console transport |
-| `STORAGE_*` | **leave blank** — local filesystem adapter |
+| `EMAIL_PROVIDER`, `EMAIL_API_KEY` | **leave commented out** — console transport |
+| `STORAGE_PROVIDER`, `STORAGE_BUCKET`, `STORAGE_ACCESS_KEY_ID`, `STORAGE_SECRET_ACCESS_KEY` | **leave commented out** — local filesystem adapter |
+
+> ⚠️ **"Leave it blank" means COMMENTED OUT, not `EMAIL_PROVIDER=`.**
+>
+> dotenv turns a bare `KEY=` into the *string* `""`, and `""` is a **present**
+> value — so `.optional()` never applies and `z.enum(["resend"])` / `.min(1)`
+> reject it. `.env.example` used to ship six keys that way, and
+> `cp .env.example .env` then failed with six validation errors while its own
+> prose said to leave them blank. Fixed at the repository split; `.env.example`
+> now comments them out, and `env-template.test.ts` case 9 loads the template
+> through the real validator so it cannot regress.
+>
+> `EMAIL_FROM`, `EMAIL_REPLY_TO` and `STORAGE_REGION` are left *set* in the
+> template on purpose: their example values are valid, and neither integration
+> activates until **all four** email keys or **all five** storage keys are
+> present.
 
 `.env` is ignored by git at every depth and the CI hygiene job fails the build
 if one is ever tracked. Never paste a connection string into an issue, a log or

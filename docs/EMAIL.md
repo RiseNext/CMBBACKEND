@@ -201,7 +201,8 @@ belongs to whoever ran it.
 | Link 404s | `FRONTEND_URL` points at the API, not the frontend | It is the **Vercel** origin |
 | "This invitation is not valid" immediately | Expired (72 h), already consumed, or the account is not Active | Resend from the employee detail view |
 | Reset always 204, nothing arrives | Working as designed for an unknown address; otherwise a provider fault | Check the Resend dashboard and the backend log — the failure is logged, never shown |
-| Nothing at all, no error | `EMAIL_PROVIDER` blank → console transport | The log line says so at boot |
+| Nothing at all, no error | `EMAIL_PROVIDER` absent → console transport | The log line says so at boot |
+| Backend refuses to start: `EMAIL_PROVIDER: Invalid input: expected "resend"` | `EMAIL_PROVIDER=` — a bare `KEY=` is the *string* `""`, which is a **present** value, so `.optional()` does not apply | **Comment the line out**, do not leave it empty. `.env.example` ships it commented; see its header |
 
 **Related:** `docs/SECRETS.md` (the variables) · `docs/BOOTSTRAP.md` (step 1) ·
 `docs/RUNBOOK.md` (day-2 operations) · `docs/DECISIONS.md` D-033, D-035, D-037,

@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import dotenv from "dotenv";
 import { describe, expect, it } from "vitest";
+import { emailTransport, loadEnv, storageAdapterKind } from "../config/env.js";
 
 /**
  * THE ENVIRONMENT TEMPLATE MATCHES THE CODE — Task 15.15.
@@ -140,9 +142,23 @@ describe("B · the template does not contradict the schema", () => {
 
   it("7. no real-looking secret is present in the template", async () => {
     // A placeholder that looks configured is how a deploy ends up running on
-    // one. The two API-key-shaped keys ship EMPTY.
+    // one. The API-key-shaped keys must carry NO VALUE.
+    //
+    // This used to demand the bare form `KEY=` specifically, and that turned out
+    // to be the wrong shape to insist on — see case 9. Commented out is strictly
+    // stronger: the key is absent rather than present-and-empty. Both forms are
+    // accepted here; a VALUE is what is refused.
+    // `[ \t]` rather than `\s`, deliberately: `\s` matches a NEWLINE, so
+    // `KEY=\s*\S` happily walks past the end of the line and matches the first
+    // character of the next comment block. The negative assertion below was
+    // green against a template that did ship a value, for exactly that reason.
     for (const key of ["EMAIL_API_KEY", "STORAGE_ACCESS_KEY_ID", "STORAGE_SECRET_ACCESS_KEY"]) {
-      expect(TEMPLATE, `${key} must ship empty`).toMatch(new RegExp(`^${key}=\\s*$`, "m"));
+      expect(TEMPLATE, `${key} must ship with no value`).toMatch(
+        new RegExp(`^#?[ \\t]?${key}=[ \\t]*$`, "m"),
+      );
+      expect(TEMPLATE, `${key} must not ship a value of any kind`).not.toMatch(
+        new RegExp(`^#?[ \\t]?${key}=[ \\t]*\\S`, "m"),
+      );
     }
     // Nothing anywhere that looks like a live Resend key.
     expect(TEMPLATE).not.toMatch(/re_[A-Za-z0-9]{16,}/);
@@ -153,5 +169,174 @@ describe("B · the template does not contradict the schema", () => {
     // preference. A template that quietly said `us-east-1` would be a
     // compliance failure delivered by a config file.
     expect(TEMPLATE).toMatch(/^STORAGE_REGION=ap-south-1$/m);
+  });
+});
+
+/* ══ C — the template actually LOADS ══════════════════════════════════════ */
+
+/**
+ * Group A checks that the key LISTS agree. That is necessary and it is not
+ * sufficient, which this group exists to prove.
+ *
+ * ── THE FINDING ─────────────────────────────────────────────────────────────
+ *
+ * Every key was documented, every key was read, group A was green — and
+ * `cp .env.example .env` still could not start the process.
+ *
+ * `EMAIL_PROVIDER=` and five others shipped as bare empty assignments. dotenv
+ * turns `KEY=` into the STRING `""`, and `""` is a present value: `.optional()`
+ * never fires, so `z.enum(["resend"])` and `.min(1)` reject it. The template's
+ * own prose said "leave them blank locally and the backend boots on the console
+ * transport", and doing exactly that produced six validation errors.
+ *
+ * It surfaced when the first real staging database was set up — `npm run db:seed`
+ * refused to start — and the workaround at the time was to comment the lines out
+ * by hand, in a file every future developer would copy again.
+ *
+ * A list-comparison test cannot catch that. Loading the file can.
+ *
+ * ── WHY IMPORTING `env.ts` IS SAFE HERE ─────────────────────────────────────
+ *
+ * Group A deliberately parses `env.ts` as TEXT, because importing it runs
+ * `dotenv/config` and would make the assertions depend on the developer's own
+ * environment. That reasoning does not apply to `loadEnv(source)`: it validates
+ * the object it is GIVEN and never reads `process.env` unless asked to. The
+ * import's side effect cannot reach these cases.
+ */
+describe("C · .env.example loads, and production stays strict", () => {
+  /** The template exactly as dotenv materialises it — the real contract. */
+  const asLoaded = (): Record<string, string> => dotenv.parse(TEMPLATE);
+
+  /**
+   * Collect the schema's complaints, or `[]` when it accepts the input.
+   *
+   * `loadEnv` throws in TWO shapes and both matter here: zod failures arrive as
+   * a header line followed by one indented `- KEY: message` per issue, while the
+   * production-only blocks (email, storage) throw a single sentence with no
+   * newline at all. Slicing off a header that is not there is how the first
+   * draft of case 12 reported a strict production config as permissive.
+   */
+  function complaints(source: Record<string, string>): string[] {
+    try {
+      loadEnv(source as NodeJS.ProcessEnv);
+      return [];
+    } catch (error) {
+      const message = (error as Error).message;
+      if (!message.includes("\n")) return [message];
+      return message
+        .split("\n")
+        .slice(1)
+        .map((line) => line.trim().replace(/^- /, ""))
+        .filter(Boolean);
+    }
+  }
+
+  /** The key each complaint is about. */
+  const keysOf = (issues: string[]) => issues.map((i) => i.split(":")[0]!.trim()).sort();
+
+  it("9. THE FINDING: loading the template complains about AADHAAR_PEPPER and nothing else", async () => {
+    // The pepper's emptiness is the one DELIBERATE refusal — Task 13.4 removed
+    // its default so a fresh copy cannot boot on a published value. Every other
+    // complaint was an accident of `KEY=` meaning "empty string".
+    expect(keysOf(complaints(asLoaded()))).toEqual(["AADHAAR_PEPPER"]);
+  });
+
+  it("10. with a pepper supplied, the template boots as-is", async () => {
+    // This is the developer's actual first five minutes: copy the file,
+    // `openssl rand -base64 48`, paste, run. It has to work.
+    const env = loadEnv({ ...asLoaded(), AADHAAR_PEPPER: "a".repeat(48) } as NodeJS.ProcessEnv);
+    expect(env.NODE_ENV).toBe("development");
+    // ...and the optional integrations are OFF rather than misconfigured.
+    expect(emailTransport(env)).toBe("console");
+    expect(storageAdapterKind(env)).toBe("local");
+  });
+
+  it("11. an explicitly-supplied empty string is still REJECTED", async () => {
+    // The fix was to the template, not to the validator. Someone who genuinely
+    // writes `EMAIL_PROVIDER=` in their own .env must still be told.
+    const base = { ...asLoaded(), AADHAAR_PEPPER: "a".repeat(48) };
+    for (const key of [
+      "EMAIL_PROVIDER",
+      "EMAIL_API_KEY",
+      "STORAGE_PROVIDER",
+      "STORAGE_BUCKET",
+      "STORAGE_ACCESS_KEY_ID",
+      "STORAGE_SECRET_ACCESS_KEY",
+    ]) {
+      expect(keysOf(complaints({ ...base, [key]: "" })), `${key}="" must be refused`).toContain(key);
+    }
+  });
+
+  it("12. production strictness is unchanged — all nine keys still required", async () => {
+    // The template's whole point is that these are optional in development.
+    // Production is where that stops being true, and this is the case that
+    // would fail if the fix had been "make everything optional".
+    const prod = {
+      ...asLoaded(),
+      NODE_ENV: "production",
+      AADHAAR_PEPPER: "a".repeat(48),
+      JWT_ACCESS_SECRET: "a".repeat(48),
+      JWT_REFRESH_SECRET: "b".repeat(48),
+    };
+    const issues = complaints(prod).join(" ");
+    expect(issues).toMatch(/Email configuration is required in production/);
+    expect(issues).toMatch(/EMAIL_PROVIDER/);
+    expect(issues).toMatch(/EMAIL_API_KEY/);
+
+    // Storage is reported once email is satisfied — the two blocks are separate.
+    const withEmail = {
+      ...prod,
+      EMAIL_PROVIDER: "resend",
+      EMAIL_API_KEY: "not-a-real-key",
+      EMAIL_FROM: "Rise Next <no-reply@example.com>",
+      EMAIL_REPLY_TO: "support@example.com",
+    };
+    const storageIssues = complaints(withEmail).join(" ");
+    expect(storageIssues).toMatch(/Object storage configuration is required in production/);
+    for (const key of ["STORAGE_PROVIDER", "STORAGE_BUCKET", "STORAGE_ACCESS_KEY_ID", "STORAGE_SECRET_ACCESS_KEY"]) {
+      expect(storageIssues, `${key} must still be demanded in production`).toContain(key);
+    }
+  });
+
+  it("13. fully configured, production accepts the same template", async () => {
+    // The other direction: the template must describe a shape that CAN be
+    // completed into a valid production configuration. None of these values is
+    // real — they are shapes.
+    const env = loadEnv({
+      ...asLoaded(),
+      NODE_ENV: "production",
+      AADHAAR_PEPPER: "a".repeat(48),
+      JWT_ACCESS_SECRET: "a".repeat(48),
+      JWT_REFRESH_SECRET: "b".repeat(48),
+      EMAIL_PROVIDER: "resend",
+      EMAIL_API_KEY: "not-a-real-key",
+      EMAIL_FROM: "Rise Next <no-reply@example.com>",
+      EMAIL_REPLY_TO: "support@example.com",
+      STORAGE_PROVIDER: "s3",
+      STORAGE_BUCKET: "example-bucket",
+      STORAGE_REGION: "ap-south-1",
+      STORAGE_ACCESS_KEY_ID: "not-a-real-key-id",
+      STORAGE_SECRET_ACCESS_KEY: "not-a-real-secret",
+    } as NodeJS.ProcessEnv);
+    expect(emailTransport(env)).toBe("resend");
+    expect(storageAdapterKind(env)).toBe("s3");
+  });
+
+  it("14. every optional key is ABSENT in the template, not empty", async () => {
+    // The structural half of case 9, so a regression names the offending key
+    // rather than just reporting a failed load.
+    //
+    // AADHAAR_PEPPER is the documented exception. BOOTSTRAP_SUPERADMIN_PASSWORD
+    // is `z.string().optional()`, which accepts "", and the seed tests it for
+    // truthiness — so a bare `KEY=` there is harmless and stays.
+    const ALLOWED_EMPTY = new Set(["AADHAAR_PEPPER", "BOOTSTRAP_SUPERADMIN_PASSWORD"]);
+    const emptyAssignments = [...TEMPLATE.matchAll(/^([A-Z][A-Z0-9_]*)=[ \t]*$/gm)]
+      .map((m) => m[1]!)
+      .filter((key) => !ALLOWED_EMPTY.has(key));
+    expect(
+      emptyAssignments,
+      `these ship as \`KEY=\` (an empty STRING, which the schema rejects). ` +
+        `Comment them out instead: ${emptyAssignments.join(", ")}`,
+    ).toEqual([]);
   });
 });

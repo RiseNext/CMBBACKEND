@@ -109,7 +109,7 @@ every variable with its default and its production tripwires, and
 | `CORS_ORIGIN` | yes in prod | comma-separated allow-list; the Vercel origin, no trailing slash. No wildcard — the API sends credentials |
 | `FRONTEND_URL` | **yes in prod** | default `http://localhost:3000`. **Every emailed link is built from it** — `src/services/invitations.ts:55`, `src/services/password-reset.ts:51`. Left at the default on a deployed backend, mail sends successfully and every link points at `localhost` |
 | `AADHAAR_PEPPER` | **yes everywhere** | ≥32 chars, no default. Rotating it invalidates every stored Aadhaar hash **permanently** — read `docs/SECRETS.md` §5 first |
-| `EMAIL_PROVIDER` / `EMAIL_API_KEY` / `EMAIL_FROM` / `EMAIL_REPLY_TO` | **yes in prod** | all four, or boot fails. Provider is Resend (D-033) |
+| `EMAIL_PROVIDER` / `EMAIL_API_KEY` / `EMAIL_FROM` / `EMAIL_REPLY_TO` | **yes in prod** | all four, or boot fails. Provider is Resend (D-033). Off locally by being **commented out**, not empty — see below |
 | `STORAGE_PROVIDER` / `STORAGE_BUCKET` / `STORAGE_REGION` / `STORAGE_ACCESS_KEY_ID` / `STORAGE_SECRET_ACCESS_KEY` | **yes in prod** | all five, or boot fails. AWS S3 `ap-south-1` (D-071) — data residency for Indian KYC documents is a **legal** constraint |
 | `STORAGE_ENDPOINT` | no | only for an S3-compatible provider that is not AWS |
 | `STORAGE_SIGNED_URL_TTL_SECONDS` | no | default `300`, max `3600` |
@@ -124,6 +124,21 @@ every variable with its default and its production tripwires, and
 **Nine variables are required in production and in no other environment**: the
 four `EMAIL_*` and the five `STORAGE_*`. The backend refuses to boot without
 them and names the missing keys — never their values.
+
+> ### `# KEY=` and `KEY=` are not the same thing
+>
+> dotenv turns a bare `KEY=` into the **string** `""`, and `""` is a *present*
+> value — so `.optional()` never applies and `z.enum(["resend"])` / `.min(1)`
+> reject it. An optional integration is switched off by **commenting the line
+> out**, which is how `.env.example` ships `EMAIL_PROVIDER`, `EMAIL_API_KEY`,
+> `STORAGE_PROVIDER`, `STORAGE_BUCKET` and the two storage credentials.
+>
+> The one deliberate empty assignment is `AADHAAR_PEPPER=`, so that a straight
+> copy of the template **refuses to boot** until you generate one. That refusal
+> is the feature (SEC-007).
+>
+> `env-template.test.ts` group C loads the template through the real validator,
+> so this cannot drift back.
 
 **Never commit `.env`.** `.gitignore` covers `.env` and `.env.*` while keeping
 `.env.example` trackable, and the CI **hygiene** job fails the build if an
