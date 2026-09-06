@@ -1,0 +1,25 @@
+# Normalise line endings in the repository to LF.
+#
+# This matters for more than tidiness: `scripts/*.sh` and `scripts/*.mjs` run on
+# a Linux GitHub Actions runner, and a shell script checked in with CRLF fails
+# there with `bad interpreter: /usr/bin/env bash^M` — an error that names the
+# wrong thing and costs an afternoon. The repository split was authored on
+# Windows, so this is not hypothetical.
+* text=auto eol=lf
+
+# Explicit, so a future core.autocrlf change cannot reach them.
+*.sh   text eol=lf
+*.mjs  text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.json text eol=lf
+*.sql  text eol=lf
+*.yml  text eol=lf
+*.md   text eol=lf
+
+# Lockfiles are generated; collapse them in diffs and reviews.
+package-lock.json linguist-generated=true -diff
+
+# Drizzle snapshots are generated and enormous; they are still reviewed by
+# `drizzle-kit check` and the CI schema job, not by eye.
+drizzle/meta/*_snapshot.json linguist-generated=true -diff

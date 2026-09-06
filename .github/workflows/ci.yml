@@ -1,0 +1,206 @@
+# CONTINUOUS INTEGRATION — CMBBACKEND.
+#
+# Derived from the monorepo workflow (`.github/workflows/ci.yml`, Task 14.7) at
+# the repository split. The commands are unchanged; what changed is that this
+# repository's root IS the backend, so every `working-directory: backend` and
+# every `backend/`-prefixed path is gone. The frontend jobs moved to
+# https://github.com/RiseNext/CMBFRONTEND.
+#
+# ── THE JOBS ARE SPLIT BY WHAT FAILS TOGETHER, NOT BY LAYER ─────────────────
+#
+# `backend` and `schema` run in parallel because a lint failure in one should
+# not hide a schema failure in the other. `schema` is separate for a sharper
+# reason, in its own comment below.
+#
+# ── WHAT IS DELIBERATELY NOT HERE ───────────────────────────────────────────
+#
+# **No deploy job.** Railway builds from this repository itself; a second build
+# here would be a second source of truth about what shipped. What CI owes it is
+# a red light before it starts.
+#
+# **No real Postgres.** The suite runs on PGlite (see the `backend` job), and
+# roadmap 14.9 — the same suite against a real server — is a genuinely separate
+# piece of work: it needs a service container, a `DATABASE_URL` override the
+# harness honours, and a decision about how long CI may take. Adding a Postgres
+# service here without wiring the harness to it would produce a green job that
+# proved nothing, which is worse than the honest gap.
+#
+# **No coverage gate.** There is no baseline to hold, and a threshold invented
+# here would be arbitrary.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch cancels the first. CI that is still grinding
+# through a superseded commit is CI nobody waits for.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  # ────────────────────────────────────────────────────────────── backend ────
+  backend:
+    name: Backend · typecheck, lint, tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      # The suite runs against the REAL shipped migrations on an in-process
+      # PGlite database, so a broken migration fails here. PGlite is not
+      # Postgres, and that gap is roadmap 14.9 — see the header.
+      - name: Tests
+        run: npm test
+        env:
+          NODE_ENV: test
+
+      # Proves the container's `CMD` target is actually produced. The Dockerfile
+      # runs `dist/server.js`; a build that emits nothing would only be
+      # discovered by Railway, at deploy time.
+      - name: Build
+        run: npm run build
+
+      - name: Verify the production entry points exist
+        run: |
+          for entry in dist/server.js dist/jobs/run.js dist/db/migrate.js dist/db/seed.js; do
+            test -f "$entry" || { echo "MISSING: $entry"; exit 1; }
+            echo "present: $entry"
+          done
+
+  # ─────────────────────────────────────────────────────────────── schema ────
+  schema:
+    name: Schema · Drizzle zero-diff and consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - run: npm ci
+
+      # ── THIS JOB EXISTS BECAUSE OF WAVE 0 ────────────────────────────────
+      #
+      # Snapshots for migrations 0008–0013 were **absent** for six migrations
+      # before anyone noticed. `drizzle-kit generate` reads `meta/` to work out
+      # the current schema; with 0007 as the newest snapshot it re-emitted every
+      # statement from 0008 onwards as one new migration, which fails on
+      # statement one against a database that has already run them.
+      #
+      # Nothing caught it, because generating a migration is something a
+      # developer does deliberately and the breakage only appears the next time
+      # somebody does it. D-081 reconstructed the snapshots; this job is what
+      # stops it recurring.
+      #
+      # The check is: `generate` must change NOTHING under `drizzle/`. If the
+      # schema and the snapshots disagree — in either direction — it emits a
+      # migration or rewrites a snapshot, and the content hash below moves.
+      - name: drizzle-kit check (migration consistency)
+        run: npx drizzle-kit check
+
+      - name: Snapshot and journal counts agree with the migrations on disk
+        run: |
+          sql=$(ls drizzle/*.sql | wc -l)
+          snap=$(ls drizzle/meta/*_snapshot.json | wc -l)
+          journal=$(node -e "console.log(require('./drizzle/meta/_journal.json').entries.length)")
+          echo "migrations=$sql snapshots=$snap journal=$journal"
+          test "$sql" = "$snap" || { echo "A migration has no snapshot — this is the Wave 0 defect."; exit 1; }
+          test "$sql" = "$journal" || { echo "The journal disagrees with the migrations on disk."; exit 1; }
+
+      - name: db:generate produces ZERO change
+        run: |
+          # A CONTENT SNAPSHOT taken before and after, not `git diff`.
+          #
+          # `git diff` answers "does the tree match HEAD?", which is a different
+          # question and gives the wrong answer twice: it is blind to untracked
+          # files, and it fails on legitimate uncommitted migration work that
+          # `db:generate` never touched. What this step is actually about is
+          # whether GENERATE ITSELF changes anything.
+          snapshot() { find drizzle -type f \( -name '*.sql' -o -name '*.json' \) -print0 | sort -z | xargs -0 sha256sum | sha256sum; }
+          before=$(snapshot)
+          npm run db:generate
+          after=$(snapshot)
+          if [ "$before" != "$after" ]; then
+            echo "::error::db:generate changed files under drizzle/. The schema and the snapshots disagree."
+            git status --porcelain drizzle/
+            git --no-pager diff -- drizzle/
+            exit 1
+          fi
+          echo "Zero diff: db:generate is a no-op, so the schema and the snapshots agree."
+
+  # ────────────────────────────────────────────────── repository hygiene ────
+  hygiene:
+    name: Repository · no committed secrets or build output
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Not a secret SCANNER — that is a different tool and a different job.
+      # This catches the specific, cheap mistake: an actual `.env` committed
+      # next to the `.env.example` that invites creating one (SEC-025).
+      - name: No .env files are tracked
+        run: |
+          tracked=$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v '\.env\.example$' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::Environment files are tracked:"; echo "$tracked"; exit 1
+          fi
+          echo "No tracked .env files."
+
+      - name: No build output or dependencies are tracked
+        run: |
+          tracked=$(git ls-files | grep -E '(^|/)(node_modules|dist)/' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::Build output is tracked:"; echo "$tracked" | head -20; exit 1
+          fi
+          echo "No tracked build output."
+
+      # `drizzle-kit` lists `meta/` and parses every file it finds as JSON, so a
+      # README there crashed `db:generate` outright. D-081 banned prose from the
+      # directory; this is the enforcement.
+      - name: No prose in drizzle/meta
+        run: |
+          stray=$(git ls-files 'drizzle/meta/*' | grep -v '\.json$' || true)
+          if [ -n "$stray" ]; then
+            echo "::error::Non-JSON files in meta/ break drizzle-kit (D-081):"; echo "$stray"; exit 1
+          fi
+          echo "meta/ contains JSON only."
+
+      # The local filesystem storage adapter writes real uploaded documents
+      # here when the STORAGE_* keys are unset. It must never be committed.
+      - name: No local storage artefacts are tracked
+        run: |
+          tracked=$(git ls-files | grep -E '(^|/)\.storage/' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::Local storage artefacts are tracked — these can be real KYC documents:"; echo "$tracked" | head -20; exit 1
+          fi
+          echo "No tracked storage artefacts."

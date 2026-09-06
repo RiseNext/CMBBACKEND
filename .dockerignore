@@ -1,0 +1,17 @@
+# Keeps the build context small and, more importantly, keeps secrets and test
+# fixtures out of it. Anything listed here is invisible to `docker build`, so it
+# cannot be copied into a layer by a careless `COPY .`.
+node_modules
+dist
+.env
+.env.*
+!.env.example
+*.log
+coverage
+.vitest
+src/tests
+**/*.test.ts
+.git
+.gitignore
+Dockerfile
+.dockerignore
