@@ -146,10 +146,13 @@ const MATRIX: Row[] = [
    */
   { what: "edit an FVR checklist", method: "patch", path: "/api/maintenance/fvr/00000000-0000-4000-8000-000000000000", permission: "maintenance.edit", body: {} },
   { what: "set a file's branch and BT lead id", method: "patch", path: "/api/maintenance/loan/00000000-0000-4000-8000-000000000000", permission: "maintenance.edit", body: {} },
-  { what: "record a manager payment status", method: "patch", path: "/api/maintenance/payment/00000000-0000-4000-8000-000000000000", permission: "maintenance.edit", body: {} },
+  { what: "record manager fields on a disbursement", method: "patch", path: "/api/maintenance/disbursement/00000000-0000-4000-8000-000000000000", permission: "maintenance.edit", body: {} },
   { what: "create a region", method: "post", path: "/api/maintenance/regions", permission: "maintenance.manage_locations", body: {} },
   { what: "create an area", method: "post", path: "/api/maintenance/areas", permission: "maintenance.manage_locations", body: {} },
   { what: "create a branch", method: "post", path: "/api/maintenance/branches", permission: "maintenance.manage_locations", body: {} },
+  { what: "rename a region", method: "patch", path: "/api/maintenance/regions/00000000-0000-4000-8000-000000000000", permission: "maintenance.manage_locations", body: {} },
+  { what: "rename an area", method: "patch", path: "/api/maintenance/areas/00000000-0000-4000-8000-000000000000", permission: "maintenance.manage_locations", body: {} },
+  { what: "rename a branch", method: "patch", path: "/api/maintenance/branches/00000000-0000-4000-8000-000000000000", permission: "maintenance.manage_locations", body: {} },
 ];
 
 let ctx: TestContext;

@@ -20,7 +20,7 @@ import { notFound, unprocessable } from "../lib/errors.js";
 import { patchSchema } from "../lib/zod.js";
 import { PERMISSIONS } from "../lib/permissions.js";
 import { authOf, requireAuth, requirePermission } from "../middleware/auth.js";
-import { assertBankAccess, bankScope } from "../services/access.js";
+import { assertBankAccess, assertPermission, bankScope } from "../services/access.js";
 import { diff, recordAudit } from "../services/audit.js";
 
 /**
@@ -190,6 +190,9 @@ const sheetColumns = {
   id: disbursements.id,
   code: disbursements.code,
   date: sql<string | null>`${reportedAt}`.as("date"),
+  /** The file this payment belongs to. Carried so the maintenance drawer can
+   *  write the file-level columns (branch, BT lead id) without a second lookup. */
+  loanId: disbursements.loanId,
   customerId: disbursements.customerId,
   customerName: customers.name,
   customerMobile: customers.mobile,
@@ -512,6 +515,19 @@ const fvrMaintenanceInput = z.object({
   cholaOutstandingDetails: z.string().trim().max(500).optional().nullable(),
   newKycCustomer: z.enum(fvrYesNo).optional().nullable(),
   remarks: z.string().trim().max(2000).optional().nullable(),
+  /**
+   * `Customer Profile (Occupation / Business / Employment)`.
+   *
+   * Writes `customers.occupation` — the EXISTING authoritative column — and not
+   * a copy on `verifications`. The column has always existed and has always been
+   * accepted by `PATCH /api/customers/:id`; it is simply on no form in the
+   * product, reachable only through the Excel importer, so this line of the
+   * manager's checklist was permanently blank.
+   *
+   * Because it edits the CUSTOMER rather than the verification, writing it
+   * additionally requires `customers.edit` — see the handler.
+   */
+  customerProfile: z.string().trim().max(120).optional().nullable(),
   /*
    * The three signature lines. Plain text, and that is the whole of it.
    *
@@ -547,9 +563,60 @@ maintenanceRouter.patch(
       // Re-asserted on the ROW's own bank, not on anything the caller sent.
       assertBankAccess(ctx, before.bankId);
 
-      const { remarks, annualIncome, ...rest } = input;
+      const { remarks, annualIncome, customerProfile, ...rest } = input;
+
+      /*
+       * `customerProfile` writes the CUSTOMER, not this verification, so it
+       * needs the permission that governs customers. Admin and Manager — the two
+       * seeded holders of `maintenance.edit` — already hold `customers.edit`, so
+       * nothing changes for them; this stops a bespoke maintenance-only role
+       * reaching customer master data through a checklist field.
+       */
+      if (customerProfile !== undefined) {
+        assertPermission(ctx, PERMISSIONS.customers.edit);
+      }
+
+      // Which customer the checklist is about. `verifications.customer_id` is
+      // nullable, so the loan's customer is the fallback — the same resolution
+      // the FVR projection uses.
+      const [loanRow] = await db
+        .select({ customerId: loans.customerId })
+        .from(loans)
+        .where(eq(loans.id, before.loanId))
+        .limit(1);
+      const subjectId = before.customerId ?? loanRow?.customerId ?? null;
 
       const after = await db.transaction(async (tx) => {
+        if (customerProfile !== undefined && subjectId) {
+          const [customerBefore] = await tx
+            .select()
+            .from(customers)
+            .where(and(eq(customers.id, subjectId), isNull(customers.deletedAt)))
+            .limit(1);
+          if (customerBefore) {
+            // Scoping re-checked on the CUSTOMER's own bank, which is not
+            // necessarily the verification's.
+            assertBankAccess(ctx, customerBefore.bankId);
+            const [customerAfter] = await tx
+              .update(customers)
+              .set({ occupation: customerProfile, updatedAt: new Date(), updatedBy: ctx.userId })
+              .where(eq(customers.id, subjectId))
+              .returning();
+            // Audited as a customer change, because that is what it is.
+            await recordAudit(tx as never, ctx, req, {
+              action: "updated",
+              recordType: "customer",
+              recordId: subjectId,
+              bankId: customerBefore.bankId,
+              summary: `Updated the customer profile from the FVR checklist`,
+              changes: diff(
+                customerBefore as unknown as Record<string, unknown>,
+                customerAfter as unknown as Record<string, unknown>,
+              ),
+            });
+          }
+        }
+
         const [row] = await tx
           .update(verifications)
           .set({
@@ -681,19 +748,50 @@ maintenanceRouter.patch(
  * `POST /api/disbursements/:id/approve` remains the only way to mark money
  * Credited, and it still refuses without a UTR.
  */
-const paymentMaintenanceInput = z.object({
+const disbursementMaintenanceInput = z.object({
+  /** Manager maintenance — see `paymentStatuses`. Gates nothing. */
   paymentStatus: z.enum(paymentStatuses).optional().nullable(),
+  /**
+   * `MANAGER NAME` and `REMARK` on the Transfer sheet.
+   *
+   * These are the EXISTING authoritative columns — `disbursements.assigned_user_id`
+   * and `.notes` — not maintenance copies of them. Both are already part of the
+   * disbursement create/patch schema and both were simply unreachable: nothing in
+   * the shipped product ever wrote either, so two columns of the manager's own
+   * sheet were permanently blank.
+   *
+   * Writing the real column rather than shadowing it is the whole point. A
+   * `maintenance_manager_name` text field would have been a second answer to
+   * "who owns this payout", free to disagree with the first.
+   */
+  assignedUserId: uuidField.optional().nullable(),
+  notes: z.string().trim().max(2000).optional().nullable(),
 });
 
 maintenanceRouter.patch(
-  "/payment/:id",
+  "/disbursement/:id",
   requirePermission(PERMISSIONS.maintenance.edit),
   async (req, res, next) => {
     try {
       const ctx = authOf(req);
       const { id } = idParam.parse(req.params);
-      const input = patchSchema(paymentMaintenanceInput).parse(req.body);
+      const input = patchSchema(disbursementMaintenanceInput).parse(req.body);
       const db = getDb();
+
+      /*
+       * A SECOND PERMISSION FOR THE AUTHORITATIVE COLUMNS.
+       *
+       * `payment_status` is this feature's own column and `maintenance.edit`
+       * owns it outright. `assigned_user_id` and `notes` are the disbursement's
+       * own, and editing them from here must not become a way to reach them
+       * without the permission that normally governs them. Both seeded holders
+       * of `maintenance.edit` (Admin, Manager) already hold `disbursements.edit`,
+       * so this changes nothing for them — it closes the hole a BESPOKE role
+       * holding only `maintenance.edit` would otherwise walk through.
+       */
+      if (input.assignedUserId !== undefined || input.notes !== undefined) {
+        assertPermission(ctx, PERMISSIONS.disbursements.edit);
+      }
 
       const [before] = await db
         .select()
@@ -702,6 +800,20 @@ maintenanceRouter.patch(
         .limit(1);
       if (!before) throw notFound("Disbursement not found");
       assertBankAccess(ctx, before.bankId);
+
+      // An owner must be a real, live user — a dangling id would print a blank
+      // MANAGER NAME while the record claimed to have one.
+      if (input.assignedUserId) {
+        const [owner] = await db
+          .select({ id: users.id })
+          .from(users)
+          .where(and(eq(users.id, input.assignedUserId), isNull(users.deletedAt)))
+          .limit(1);
+        if (!owner) {
+          const message = "That employee does not exist.";
+          throw unprocessable(message, [{ path: "assignedUserId", message }]);
+        }
+      }
 
       const after = await db.transaction(async (tx) => {
         const [row] = await tx
@@ -715,7 +827,7 @@ maintenanceRouter.patch(
           recordType: "disbursement",
           recordId: id,
           bankId: before.bankId,
-          summary: `Set the manager payment status on disbursement ${before.code}`,
+          summary: `Updated maintenance fields on disbursement ${before.code}`,
           changes: diff(
             before as unknown as Record<string, unknown>,
             row as unknown as Record<string, unknown>,
@@ -960,3 +1072,75 @@ maintenanceRouter.post(
     }
   },
 );
+
+/**
+ * Renaming and deactivating master data.
+ *
+ * There is deliberately NO DELETE. A region, area or branch is referenced by
+ * historical files, and removing one would either orphan a booked file or, via
+ * `restrict`, refuse confusingly. `status: Inactive` retires a location from the
+ * pickers while every sheet that already resolved through it keeps resolving.
+ *
+ * A rename is audited because it RE-LABELS EVERY HISTORICAL SHEET that resolves
+ * through the row — which is exactly why `manage_locations` is Admin and above.
+ */
+const locationPatch = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  status: locationStatusInput.optional(),
+});
+
+function locationEditor(
+  segment: "regions" | "areas" | "branches",
+  table: typeof regions | typeof areas | typeof branches,
+  recordType: string,
+) {
+  maintenanceRouter.patch(
+    `/${segment}/:id`,
+    requirePermission(PERMISSIONS.maintenance.manageLocations),
+    async (req, res, next) => {
+      try {
+        const ctx = authOf(req);
+        const { id } = idParam.parse(req.params);
+        const input = patchSchema(locationPatch).parse(req.body);
+        const db = getDb();
+
+        const [before] = await db
+          .select()
+          .from(table)
+          .where(and(eq(table.id, id), isNull(table.deletedAt)))
+          .limit(1);
+        if (!before) throw notFound(`${recordType} not found`);
+
+        const after = await db.transaction(async (tx) => {
+          const [row] = await tx
+            .update(table)
+            .set({ ...input, updatedAt: new Date(), updatedBy: ctx.userId })
+            .where(eq(table.id, id))
+            .returning();
+
+          await recordAudit(tx as never, ctx, req, {
+            action: "updated",
+            recordType,
+            recordId: id,
+            bankId: null,
+            summary: `Updated ${recordType} ${(before as { name: string }).name}`,
+            changes: diff(
+              before as unknown as Record<string, unknown>,
+              row as unknown as Record<string, unknown>,
+            ),
+          });
+
+          return row;
+        });
+
+        res.json({ data: after });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+}
+
+locationEditor("regions", regions, "region");
+locationEditor("areas", areas, "area");
+locationEditor("branches", branches, "branch");

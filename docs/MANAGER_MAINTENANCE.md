@@ -221,9 +221,28 @@ Team Leader and Executive hold none: these are a manager's sheets.
 `manage_locations` is withheld from Manager deliberately — renaming a branch re-labels every
 historical sheet that resolves through it, which is an administrative act.
 
-> ⚠️ **Existing deployments:** `seed()` tops up non-system roles only on first creation, so an
-> **existing** Admin or Manager role row will NOT receive these keys automatically. Only
-> `super_admin` (which holds `*`) gets them for free. Grant them on the Roles screen after deploy.
+### Granting them on an existing deployment
+
+`seed()` tops up a non-system role **only when it creates it** (`src/db/seed.ts` — `if (roleSeed.isSystem || !existing)`), because "afterwards the client owns their permission sets". So after this deploy:
+
+- **`super_admin`** holds `*` and is `isSystem`, so it receives all three keys on the next `db:seed`;
+- **`admin` and `manager` receive nothing.** The Maintenance nav stays hidden and the API answers 403.
+
+**The correct mechanism is the product's own Roles screen.** A Super Admin signs in → `/roles` → grants
+`maintenance.view` + `maintenance.edit` to **Manager**, and all three to **Admin**. That route is
+`PUT /api/roles/:id/permissions`, gated on `roles.assign_permissions` (Super Admin only by default),
+and it writes an audit row. No script, no downtime, fully reversible.
+
+**Three alternatives were considered and rejected:**
+
+| Rejected | Why |
+|---|---|
+| Grant the rows inside migration `0016` | A migration must never invent data (D-084), and silently widening authorization is precisely the change that should be a deliberate, audited human act. |
+| Make `seed()` top up existing non-system roles | It would re-grant every permission an operator had deliberately **removed**, on every redeploy. That is a regression in existing behaviour and contradicts the rule the seed comment states. |
+| A one-off grant script | Adds an unaudited privilege-granting path for something the product already does safely through a permission-gated, audited route. |
+
+Until the grant is made, the feature is simply invisible — which is the correct failure mode: no
+screen half-works and no endpoint leaks.
 
 ---
 
@@ -271,21 +290,28 @@ equal headings would collapse), it exports only the rows it holds, and it cannot
 ## 9. What is intentionally blank
 
 The manager's own sheets have blank cells, and so does this. **Nothing is defaulted, inferred or
-fabricated.** In the current data these columns will be empty until the CRM starts capturing them:
+fabricated.** Every column is blank only until somebody records it — and every one of them now has
+somewhere to be recorded.
 
-| Column | Why it is blank today |
-|---|---|
-| `MANAGER NAME` | `loans.assigned_user_id` and `disbursements.assigned_user_id` are never written by the shipped UI, so files have no owner recorded. |
-| `REMARK` | `disbursements.notes` has no UI writer. |
-| `Customer Profile` | `customers.occupation` is settable only via the Excel importer and the API — it is on no customer form. |
-| `REGION / AREA / BRANCH` | Blank until master data is created and files are assigned a branch. |
-| `BT LEAD ID` | Blank until recorded. Never generated. |
-| `Payment Status` | Blank until a manager records it. Never defaulted to either value. |
-| `Fund Credited …` | Blank unless the disbursement is `Credited`. |
-| The eleven FVR findings | Blank until a verifier records them. |
+| Column | Where it is maintained | Writes |
+|---|---|---|
+| `BRANCH` (→ `REGION`, `AREA`) | Transfer row drawer | `loans.branch_id` — Region and Area follow from the branch |
+| `BT LEAD ID` | Transfer row drawer | `loans.bt_lead_id`. **Never generated** — typed as issued |
+| `MANAGER NAME` | Transfer row drawer | `disbursements.assigned_user_id` — the **existing** column, not a copy |
+| `REMARK` | Transfer row drawer | `disbursements.notes` — the **existing** column, not a copy |
+| `Customer Profile` | FVR checklist editor | `customers.occupation` — the **customer record**; additionally needs `customers.edit` |
+| `Payment Status` | Payment row drawer | `disbursements.payment_status`. Never defaulted to either value |
+| The eleven FVR findings | FVR checklist editor | `verifications.*` |
+| Region ▸ Area ▸ Branch master data | Locations panel on the Transfer screen (`maintenance.manage_locations`) | `regions` / `areas` / `branches` |
 
-These are honest gaps in data capture, not defects in this feature. Closing them means writing the
-values through the routes that own them.
+**The only column that is deliberately not editable is `Fund Credited to Customer`.** It is blank
+unless the disbursement is `Credited`, and it becomes non-blank by the money actually being credited
+through `POST /api/disbursements/:id/approve` — which still refuses without a UTR. Making it typeable
+would let a clerical entry assert that money arrived.
+
+Likewise `TRANSFER AMOUNT`, `UTR NUMBER`, `DATE`, `CUSTOMER NAME` and `MOBILE NUMBER` are shown
+read-only in the drawer beside the editable fields. They are authoritative and are edited where they
+live (§2).
 
 ---
 

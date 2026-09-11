@@ -343,7 +343,7 @@ describe("C · the manager receipt flag is walled off from the money path", () =
 
   it("11. a manager can record it", async () => {
     const res = await request(ctx.app)
-      .patch(`/api/maintenance/payment/${creditedDisbursementId}`)
+      .patch(`/api/maintenance/disbursement/${creditedDisbursementId}`)
       .set(auth(managerToken))
       .send({ paymentStatus: "Not Received" });
 
@@ -358,7 +358,7 @@ describe("C · the manager receipt flag is walled off from the money path", () =
       .where(eq(schema.disbursements.id, creditedDisbursementId));
 
     const res = await request(ctx.app)
-      .patch(`/api/maintenance/payment/${creditedDisbursementId}`)
+      .patch(`/api/maintenance/disbursement/${creditedDisbursementId}`)
       .set(auth(managerToken))
       .send({ paymentStatus: "Received" });
     expect(res.status).toBe(200);
@@ -381,7 +381,7 @@ describe("C · the manager receipt flag is walled off from the money path", () =
 
   it("13. the route refuses a value outside the vocabulary", async () => {
     const res = await request(ctx.app)
-      .patch(`/api/maintenance/payment/${creditedDisbursementId}`)
+      .patch(`/api/maintenance/disbursement/${creditedDisbursementId}`)
       .set(auth(managerToken))
       .send({ paymentStatus: "Settled" });
 
@@ -390,7 +390,7 @@ describe("C · the manager receipt flag is walled off from the money path", () =
 
   it("14. the maintenance route cannot reach the disbursement's own status", async () => {
     const res = await request(ctx.app)
-      .patch(`/api/maintenance/payment/${inTransitDisbursementId}`)
+      .patch(`/api/maintenance/disbursement/${inTransitDisbursementId}`)
       .set(auth(managerToken))
       .send({ status: "Credited", paymentStatus: "Received" });
 
@@ -524,7 +524,7 @@ describe("E · every sheet is gated and scoped in the backend", () => {
 
   it("22. a role without `maintenance.edit` cannot write maintenance fields", async () => {
     const res = await request(ctx.app)
-      .patch(`/api/maintenance/payment/${creditedDisbursementId}`)
+      .patch(`/api/maintenance/disbursement/${creditedDisbursementId}`)
       .set(auth(executiveToken))
       .send({ paymentStatus: "Received" });
     expect(res.status).toBe(403);
@@ -559,7 +559,7 @@ describe("E · every sheet is gated and scoped in the backend", () => {
 
   it("26. …nor annotate a record it cannot see", async () => {
     const res = await request(ctx.app)
-      .patch(`/api/maintenance/payment/${creditedDisbursementId}`)
+      .patch(`/api/maintenance/disbursement/${creditedDisbursementId}`)
       .set(auth(bankBToken))
       .send({ paymentStatus: "Received" });
     expect(res.status).toBe(403);
@@ -574,10 +574,182 @@ describe("E · every sheet is gated and scoped in the backend", () => {
 
   it("28. a malformed id is 422, not a 500 with a stack trace", async () => {
     const res = await request(ctx.app)
-      .patch("/api/maintenance/payment/not-a-uuid")
+      .patch("/api/maintenance/disbursement/not-a-uuid")
       .set(auth(managerToken))
       .send({ paymentStatus: "Received" });
     expect(res.status).toBe(422);
+  });
+});
+
+/* ══ F2 — the columns that had no writer now have one ══════════════════════ */
+
+describe("F2 · MANAGER NAME, REMARK and Customer Profile are maintainable", () => {
+  it("30. MANAGER NAME writes the disbursement's OWN assigned user, not a copy", async () => {
+    const owner = await createUser(ctx.db, { roleKey: "team_leader", bankIds: [bankA.id] });
+
+    const res = await request(ctx.app)
+      .patch(`/api/maintenance/disbursement/${creditedDisbursementId}`)
+      .set(auth(managerToken))
+      .send({ assignedUserId: owner.id, notes: "Beneficiary confirmed by branch" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    // The authoritative column moved — there is no second "manager name" field.
+    const [row] = await ctx.db
+      .select({
+        assignedUserId: schema.disbursements.assignedUserId,
+        notes: schema.disbursements.notes,
+      })
+      .from(schema.disbursements)
+      .where(eq(schema.disbursements.id, creditedDisbursementId));
+    expect(row!.assignedUserId).toBe(owner.id);
+    expect(row!.notes).toBe("Beneficiary confirmed by branch");
+
+    // …and the sheet now reports it.
+    const sheet = await request(ctx.app).get("/api/maintenance/transfer").set(auth(managerToken));
+    const sheetRow = sheet.body.data.find((r: { id: string }) => r.id === creditedDisbursementId);
+    expect(sheetRow.managerName).toBeTruthy();
+    expect(sheetRow.remark).toBe("Beneficiary confirmed by branch");
+  });
+
+  it("31. a dangling employee id is refused rather than stored", async () => {
+    const res = await request(ctx.app)
+      .patch(`/api/maintenance/disbursement/${creditedDisbursementId}`)
+      .set(auth(managerToken))
+      .send({ assignedUserId: "00000000-0000-4000-8000-000000000000" });
+    expect(res.status).toBe(422);
+  });
+
+  it("32. Customer Profile writes customers.occupation — the real column", async () => {
+    const res = await request(ctx.app)
+      .patch(`/api/maintenance/fvr/${verificationId}`)
+      .set(auth(managerToken))
+      .send({ customerProfile: "Self-employed — textile trading" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const [customer] = await ctx.db
+      .select({ occupation: schema.customers.occupation })
+      .from(schema.customers)
+      .where(eq(schema.customers.id, customerAId));
+    expect(customer!.occupation).toBe("Self-employed — textile trading");
+
+    const sheet = await request(ctx.app).get("/api/maintenance/fvr").set(auth(managerToken));
+    const row = sheet.body.data.find((r: { id: string }) => r.id === verificationId);
+    expect(row.customerProfile).toBe("Self-employed — textile trading");
+  });
+
+  it("33. …and writing it is refused without `customers.edit`", async () => {
+    // A bespoke role holding maintenance.edit but nothing over customers must
+    // not reach customer master data through a checklist field.
+    const role = await request(ctx.app)
+      .post("/api/roles")
+      .set(auth(adminToken))
+      .send({ key: "maint_only", name: "Maintenance Only", level: 50 });
+    expect(role.status).toBe(201);
+
+    const perms = await request(ctx.app)
+      .put(`/api/roles/${role.body.data.id}/permissions`)
+      .set(auth(adminToken))
+      .send({ permissions: ["maintenance.view", "maintenance.edit"] });
+    expect(perms.status).toBe(200);
+
+    const user = await createUser(ctx.db, { roleKey: "maint_only", bankIds: [bankA.id] });
+    const token = await login(user.email, user.password);
+
+    // Its own maintenance column is fine …
+    const ok = await request(ctx.app)
+      .patch(`/api/maintenance/fvr/${verificationId}`)
+      .set(auth(token))
+      .send({ houseConfirmation: "Rented" });
+    expect(ok.status).toBe(200);
+
+    // … the customer's is not.
+    const refused = await request(ctx.app)
+      .patch(`/api/maintenance/fvr/${verificationId}`)
+      .set(auth(token))
+      .send({ customerProfile: "Should not be written" });
+    expect(refused.status).toBe(403);
+
+    // And the same role cannot reach the disbursement's own columns either.
+    const refusedTransfer = await request(ctx.app)
+      .patch(`/api/maintenance/disbursement/${creditedDisbursementId}`)
+      .set(auth(token))
+      .send({ notes: "Should not be written" });
+    expect(refusedTransfer.status).toBe(403);
+
+    // …while the pure maintenance column still works for it.
+    const stillOk = await request(ctx.app)
+      .patch(`/api/maintenance/disbursement/${creditedDisbursementId}`)
+      .set(auth(token))
+      .send({ paymentStatus: "Not Received" });
+    expect(stillOk.status).toBe(200);
+  });
+});
+
+/* ══ F3 — master data can be maintained ════════════════════════════════════ */
+
+describe("F3 · the location hierarchy is maintainable, and retires rather than deletes", () => {
+  it("34. a branch can be renamed, and every historical sheet follows", async () => {
+    const res = await request(ctx.app)
+      .patch(`/api/maintenance/branches/${branchId}`)
+      .set(auth(adminToken))
+      .send({ name: "OMKAR NAGAR II" });
+    expect(res.status).toBe(200);
+
+    const sheet = await request(ctx.app).get("/api/maintenance/transfer").set(auth(managerToken));
+    const row = sheet.body.data.find((r: { id: string }) => r.id === creditedDisbursementId);
+    // The file was never re-pointed — the sheet resolves through the branch, so
+    // the rename simply shows up. That is the whole reason it is not a copied
+    // string on the loan.
+    expect(row.branchName).toBe("OMKAR NAGAR II");
+
+    await request(ctx.app)
+      .patch(`/api/maintenance/branches/${branchId}`)
+      .set(auth(adminToken))
+      .send({ name: "OMKAR NAGAR" });
+  });
+
+  it("35. deactivating a branch keeps existing files resolving", async () => {
+    await request(ctx.app)
+      .patch(`/api/maintenance/branches/${branchId}`)
+      .set(auth(adminToken))
+      .send({ status: "Inactive" });
+
+    const sheet = await request(ctx.app).get("/api/maintenance/transfer").set(auth(managerToken));
+    const row = sheet.body.data.find((r: { id: string }) => r.id === creditedDisbursementId);
+    expect(row.branchName).toBe("OMKAR NAGAR");
+
+    // …but it can no longer be assigned to a new file.
+    const refused = await request(ctx.app)
+      .patch(`/api/maintenance/loan/${loanAId}`)
+      .set(auth(managerToken))
+      .send({ branchId });
+    expect(refused.status).toBe(422);
+
+    await request(ctx.app)
+      .patch(`/api/maintenance/branches/${branchId}`)
+      .set(auth(adminToken))
+      .send({ status: "Active" });
+  });
+
+  it("36. a Manager cannot rename master data — that is `manage_locations`", async () => {
+    const res = await request(ctx.app)
+      .patch(`/api/maintenance/regions/${regionId}`)
+      .set(auth(managerToken))
+      .send({ name: "Renamed By Manager" });
+    expect(res.status).toBe(403);
+  });
+
+  it("37. there is no DELETE on any location — retirement is a status change", async () => {
+    for (const [segment, id] of [
+      ["regions", regionId],
+      ["areas", areaId],
+      ["branches", branchId],
+    ] as const) {
+      const res = await request(ctx.app)
+        .delete(`/api/maintenance/${segment}/${id}`)
+        .set(auth(adminToken));
+      expect(res.status, `${segment} must not expose DELETE`).toBe(404);
+    }
   });
 });
 
