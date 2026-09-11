@@ -2,6 +2,14 @@
 
 Complete inventory of the HTTP surface of the Risenext Banking/Lending Operations CRM backend, and of which parts of it the frontend actually uses.
 
+> ⚠️ **This inventory predates `/api/maintenance/*` (2026-09-11, D-095).** Twelve endpoints are
+> missing from the counts and tables below: four sheet reads (`/fvr`, `/transfer`, `/apts`,
+> `/payment`), three maintenance writes (`PATCH /fvr/:id`, `/loan/:id`, `/payment/:id`), three
+> master-data reads (`/regions`, `/areas`, `/branches`) and three master-data writes. They are
+> documented in full — permission, source, and what each one may and may not write — in
+> [MANAGER_MAINTENANCE.md](MANAGER_MAINTENANCE.md). The rest of this document is unchanged and
+> still accurate for the endpoints it does cover.
+
 **Baseline for this document**
 
 | Item | Value |

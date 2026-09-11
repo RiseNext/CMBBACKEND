@@ -12,7 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
 import { teams, users } from "./identity.js";
-import { banks, customers } from "./domain.js";
+import { banks, branches, customers } from "./domain.js";
 
 /** Columns every operational table carries. Keeps the shape uniform for the
  *  scoped-CRUD factory, the recycle bin and the audit writer. */
@@ -188,10 +188,32 @@ export const loans = pgTable(
     approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
     approvedAt: timestamp("approved_at", { withTimezone: true }),
     notes: text("notes"),
+
+    /*
+     * ── MANAGER MAINTENANCE — Task MM-1, D-095 ──────────────────────────────
+     *
+     * Both nullable, both written only by `PATCH /api/maintenance/loan/:id`.
+     * Neither is read by any state machine, guard or money path.
+     *
+     * `branchId` is where the file was sourced. Region and Area are NOT stored
+     * here — they are reached by walking `branches.area_id → areas.region_id`,
+     * so a branch cannot disagree with itself about which area it is in.
+     *
+     * `btLeadId` is the manager's `BT LEAD ID` (sample: `BTOMKA250626053704`).
+     * It is issued OUTSIDE this system, so it is free text and is **never
+     * generated** — synthesising one would fabricate an external reference that
+     * no other system would recognise. It is deliberately NOT unique: the
+     * repository has no format rule for it and a uniqueness constraint on an
+     * identifier we do not mint would reject legitimate data on a typo in
+     * someone else's system.
+     */
+    branchId: uuid("branch_id").references(() => branches.id, { onDelete: "set null" }),
+    btLeadId: text("bt_lead_id"),
     ...lifecycle,
   },
   (t) => [
     uniqueIndex("loans_code_unique").on(t.code).where(sql`${t.deletedAt} is null`),
+    index("loans_branch_idx").on(t.branchId),
     index("loans_customer_idx").on(t.customerId),
     index("loans_bank_idx").on(t.bankId),
     index("loans_status_idx").on(t.status),
@@ -219,6 +241,22 @@ export const loans = pgTable(
     ),
   ],
 );
+
+/**
+ * The FVR checklist vocabularies — Task MM-1, D-095.
+ *
+ * Declared HERE, above `verifications`, for the same reason `loanStatuses` sits
+ * above `loans`: the CHECK constraints below read them while `pgTable(...)` is
+ * being evaluated, and the house style is that a vocabulary a constraint reads
+ * is declared before the table.
+ *
+ * Both are `Yes`/`No` rather than a boolean, because the manager's form offers
+ * exactly those two words and a NULL third state that means "not yet asked".
+ * A `boolean` column would collapse "No" and "not yet recorded" into `false`,
+ * which is precisely the fabricated answer D-004 forbids.
+ */
+export const houseConfirmations = ["Owned", "Rented"] as const;
+export const fvrYesNo = ["Yes", "No"] as const;
 
 /**
  * VERIFICATIONS — one row per loan. Exists even when not required, so the
@@ -253,10 +291,88 @@ export const verifications = pgTable(
     approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
     approvedAt: timestamp("approved_at", { withTimezone: true }),
     notes: text("notes"),
+
+    /*
+     * ── THE FVR CHECKLIST — Task MM-1, D-095 ────────────────────────────────
+     *
+     * The manager's "FIELD VERIFICATION REPORT (FVR) CHECKLIST" is a
+     * per-customer form of thirteen particulars. Nine of them already had a
+     * home — customer name, loan amount, occupation and remarks all resolve
+     * through `loans` and `customers`, and `notes` is the Remarks line. The
+     * columns below are the ones the CRM genuinely could not carry.
+     *
+     * They live on `verifications` and not on `customers` because every one of
+     * them is a FIELD-VISIT FINDING, not customer master data. "House
+     * Confirmation: Owned" is what a verifier observed on a given date, and the
+     * same customer can be verified twice with different answers. Putting them
+     * on `customers` would assert them as declared fact and silently overwrite
+     * the earlier visit.
+     *
+     * EVERY COLUMN IS NULLABLE AND EVERY ONE DEFAULTS TO NULL. A blank FVR line
+     * means "not recorded", which is exactly what the manager's own blank sheet
+     * means. Nothing here is derived, defaulted or inferred from another column.
+     *
+     * NONE of these is read by any state machine, permission check, transition
+     * guard, money path or approval route. They are written only by
+     * `PATCH /api/maintenance/fvr/:id`.
+     */
+    /** The `Date: ____` on the form header. Not `completedAt` — that is the
+     *  verification workflow's own timestamp and means something else. */
+    fvrDate: timestamp("fvr_date", { withTimezone: true }),
+    takeoverFromLender: text("takeover_from_lender"),
+    fvrDoneByName: text("fvr_done_by_name"),
+    /** The form asks for "Name & Designation" as one line; stored as two so a
+     *  designation can be reported on without re-parsing a free-text string. */
+    fvrDoneByDesignation: text("fvr_done_by_designation"),
+    houseConfirmation: text("house_confirmation"),
+    /** An independently observed figure. Deliberately NOT
+     *  `customers.monthly_income * 12`: multiplying a declared monthly figure
+     *  would print a number nobody verified onto a verification document. */
+    annualIncome: money("annual_income"),
+    cholaRelationship: text("chola_relationship"),
+    /** The form's own sub-line: "If yes, specify details outstanding loan
+     *  amount". Free text, because the sheet asks for details and an amount. */
+    cholaOutstandingDetails: text("chola_outstanding_details"),
+    newKycCustomer: text("new_kyc_customer"),
+    /*
+     * THE THREE SIGNATURE LINES.
+     *
+     * Plain nullable text and nothing more. There is no electronic-signature
+     * workflow in this system, so these record WHAT WAS WRITTEN ON THE SHEET
+     * and make no cryptographic, legal or identity claim whatsoever.
+     *
+     * They are not booleans, there is no "signed" state, no route treats a
+     * non-null value as an approval, and no guard anywhere reads them. A
+     * populated signature line authorises exactly nothing.
+     */
+    zensifyRmSignature: text("zensify_rm_signature"),
+    sharvikaRmSignature: text("sharvika_rm_signature"),
+    cholaSign: text("chola_sign"),
     ...lifecycle,
   },
   (t) => [
     uniqueIndex("verifications_loan_unique").on(t.loanId).where(sql`${t.deletedAt} is null`),
+    /*
+     * VOCABULARY ONLY — D-010, D-057.
+     *
+     * Each name ends `_status_check` so `middleware/error-handler.ts`'s
+     * `/_(status|stage)_check$/` turns a 23514 into a 422 instead of letting it
+     * fall through to a 500 with a stack trace. `... is null or ... in (...)`
+     * because NULL is the legitimate "not recorded" state and a bare `in` would
+     * reject it.
+     */
+    check(
+      "verifications_house_confirmation_status_check",
+      sql`${t.houseConfirmation} is null or ${t.houseConfirmation} in (${sql.raw(houseConfirmations.map((v) => `'${v}'`).join(", "))})`,
+    ),
+    check(
+      "verifications_chola_relationship_status_check",
+      sql`${t.cholaRelationship} is null or ${t.cholaRelationship} in (${sql.raw(fvrYesNo.map((v) => `'${v}'`).join(", "))})`,
+    ),
+    check(
+      "verifications_new_kyc_customer_status_check",
+      sql`${t.newKycCustomer} is null or ${t.newKycCustomer} in (${sql.raw(fvrYesNo.map((v) => `'${v}'`).join(", "))})`,
+    ),
     index("verifications_bank_idx").on(t.bankId),
     index("verifications_status_idx").on(t.status),
     index("verifications_provider_idx").on(t.serviceProviderId),
@@ -397,6 +513,42 @@ export const bankOrders = pgTable(
  */
 export const disbursementStatuses = ["Credited", "In Transit", "Failed"] as const;
 
+/**
+ * `disbursements.payment_status` — MANAGER MAINTENANCE ONLY. Task MM-1, D-095.
+ *
+ * ── THIS IS NOT A FINANCIAL STATE, AND THE SHEET PROVES IT ──────────────────
+ *
+ * The manager's Payment sheet shows sixteen rows that each carry a "Fund
+ * Credited to Customer" TIME — the money demonstrably left and reached the
+ * customer — and every one of those rows reads `Not Received` under "Payment
+ * Status". So it cannot be `disbursements.status` (those rows are `Credited`),
+ * it cannot be `transactions.status`, and it cannot be `settlements.status`.
+ * It is a downstream receipt flag the manager maintains by hand, and the CRM
+ * has no authoritative source for it.
+ *
+ * ── HOW IT IS KEPT OUT OF THE MONEY PATH ────────────────────────────────────
+ *
+ * Separation is STRUCTURAL, not a convention someone must remember:
+ *
+ *   · it is absent from `disbursementsRouter.createSchema`, so POST cannot set
+ *     it, and `patchSchema` derives from that schema, so PATCH cannot either;
+ *   · `transitionColumn` is `status`, so `allowedTransitions`,
+ *     `initialStatuses` and `allowedStatuses` never look at this column;
+ *   · no guard, hook, notification, ledger entry or approval reads it —
+ *     `afterApprove`'s UTR precondition is untouched;
+ *   · the ONLY writer is `PATCH /api/maintenance/payment/:id`, gated on
+ *     `maintenance.edit`, which writes this column and nothing else.
+ *
+ * It therefore cannot override, shortcut or contradict the canonical financial
+ * state. Setting it to `Received` moves no money and approves nothing.
+ *
+ * NULL means "not yet maintained" and is the default. Only `Not Received` is
+ * attested in the supplied sheet; `Received` is the other half of the binary
+ * that word implies. **Flagged for manager confirmation** — if the real
+ * vocabulary is longer, this one const and one CHECK are the whole change.
+ */
+export const paymentStatuses = ["Received", "Not Received"] as const;
+
 export const disbursements = pgTable(
   "disbursements",
   {
@@ -421,6 +573,10 @@ export const disbursements = pgTable(
     disbursedOn: timestamp("disbursed_on", { withTimezone: true }),
     status: text("status").notNull().default("In Transit"),
     creditedTo: text("credited_to"),
+
+    /** Manager maintenance only — see `paymentStatuses` above for why this is
+     *  not, and can never become, part of the disbursement state machine. */
+    paymentStatus: text("payment_status"),
 
     assignedUserId: uuid("assigned_user_id").references(() => users.id, { onDelete: "set null" }),
     approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
@@ -453,6 +609,15 @@ export const disbursements = pgTable(
     check(
       "disbursements_status_check",
       sql`${t.status} in (${sql.raw(disbursementStatuses.map((s) => `'${s}'`).join(", "))})`,
+    ),
+    /*
+     * The maintenance column's vocabulary — D-010, D-095. NULL is legal and is
+     * the default, so the predicate admits it explicitly. Named `_status_check`
+     * for the 422 mapping, exactly as the constraint above it.
+     */
+    check(
+      "disbursements_payment_status_check",
+      sql`${t.paymentStatus} is null or ${t.paymentStatus} in (${sql.raw(paymentStatuses.map((s) => `'${s}'`).join(", "))})`,
     ),
   ],
 );

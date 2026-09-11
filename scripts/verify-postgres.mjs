@@ -60,13 +60,23 @@ const usePooled = process.argv.includes("--pooled");
  * is answerable.
  */
 const EXPECT = {
-  migrations: 16, //  drizzle/0000 … 0015 — journal, snapshots and files all agree
-  tables: 30,
-  foreignKeys: 65,
-  primaryKeys: 30, // one per table
-  triggers: 7, //     D-057; 0014 and 0015 both state the count stays at 7
-  checkConstraints: 13, // 12 × *_status_check + bank_orders_stage_check
-  statusChecks: 12, //     constraints matching '%_status_check' specifically
+  migrations: 17, //  drizzle/0000 … 0016 — journal, snapshots and files all agree
+  tables: 33, //      +3 in 0016: regions, areas, branches (D-095)
+  foreignKeys: 69, // +4 in 0016: areas→regions, branches→areas, branches→banks, loans→branches
+  primaryKeys: 33, // one per table
+  triggers: 7, //     D-057; 0014, 0015 and 0016 all state the count stays at 7
+  /*
+   * 20 = 13 before 0016, + 7 added by it: three `*_status_check` on the new
+   * location tables, and four vocabulary guards on the manager-maintenance
+   * columns (disbursements.payment_status, verifications.house_confirmation,
+   * .chola_relationship, .new_kyc_customer).
+   *
+   * All seven are named `*_status_check` deliberately: error-handler.ts matches
+   * that suffix to answer 422 rather than 500, and the four maintenance ones
+   * carry caller-supplied vocabularies, so they belong in the 4xx class.
+   */
+  checkConstraints: 20,
+  statusChecks: 19, //     constraints matching '%_status_check' specifically
 };
 
 /*
@@ -89,10 +99,10 @@ const EXPECT = {
 
 /** The tables the migrations create. Sorted; compared as a set. */
 const EXPECTED_TABLES = [
-  "app_settings", "assignment_history", "audit_logs", "bank_orders", "banks",
-  "customers", "disbursements", "documents", "funding_sources", "import_batches",
+  "app_settings", "areas", "assignment_history", "audit_logs", "bank_orders", "banks",
+  "branches", "customers", "disbursements", "documents", "funding_sources", "import_batches",
   "import_rows", "invitations", "ledger_entries", "loans", "notifications",
-  "password_resets", "permissions", "recycle_bin_entries", "refresh_tokens",
+  "password_resets", "permissions", "recycle_bin_entries", "refresh_tokens", "regions",
   "required_document_types", "role_permissions", "roles", "service_providers",
   "settlements", "team_members", "teams", "transactions", "user_bank_access",
   "users", "verifications",
@@ -117,6 +127,9 @@ const EXPECTED_TRIGGERS = [
  * would report it, so they are named individually rather than counted.
  */
 const EXPECTED_PARTIAL_INDEXES = [
+  // 0016 (D-095): master data is unique among LIVE rows, so a deactivated
+  // branch does not permanently reserve its name.
+  "areas_region_name_unique", "branches_area_name_unique", "regions_name_unique",
   "bank_orders_code_unique", "bank_orders_loan_unique", "banks_code_unique",
   "customers_bank_reference_unique", "customers_code_unique",
   "disbursements_code_unique", "disbursements_utr_unique",

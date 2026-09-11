@@ -89,6 +89,7 @@ A Banking / Lending Operations CRM for a loan-origination business. **The backen
 | [PRD.md](PRD.md) | What the product should do, with honest per-requirement status |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | The architecture that actually exists, component by component |
 | [BUSINESS_FLOW.md](BUSINESS_FLOW.md) | The end-to-end operational flow, annotated with where it breaks |
+| [MANAGER_MAINTENANCE.md](MANAGER_MAINTENANCE.md) | The four manager tracking formats (FVR, Transfer, APTS, Payment) — field-by-field sources, what is authoritative vs derived vs maintenance, and the 8 questions still open for management |
 | [ROLES_AND_PERMISSIONS.md](ROLES_AND_PERMISSIONS.md) | The 5 roles, 76 permissions, and a per-role capability matrix |
 | [DATA_MODEL.md](DATA_MODEL.md) | All 27 tables, relationships, triggers, and which are dead |
 | [API_OVERVIEW.md](API_OVERVIEW.md) | All 96 endpoints with permission, validation, DB effect and caller |

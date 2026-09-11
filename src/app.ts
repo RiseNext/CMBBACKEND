@@ -22,6 +22,7 @@ import {
   usersRouter,
 } from "./modules/admin.routes.js";
 import { importsRouter } from "./modules/imports.routes.js";
+import { maintenanceRouter } from "./modules/maintenance.routes.js";
 import { settingsRouter } from "./modules/settings.routes.js";
 import { documentsUploadRouter, kycPackRouter } from "./modules/documents.routes.js";
 import {
@@ -174,6 +175,13 @@ export function createApp(): Express {
   // Task 11.3 — SQL-aggregated reporting, replacing a client-side computation
   // over a page capped at 500 loans.
   app.use("/api/reports", reportsRouter);
+  /*
+   * Task MM-1, D-095 — the four manager tracking formats, as read projections
+   * over records that already exist. Its own prefix, so there is no `/:id`
+   * ordering hazard with any factory router, and it is mounted AFTER the global
+   * limiter like every other feature route.
+   */
+  app.use("/api/maintenance", maintenanceRouter);
   // Task 12.6 — `app_settings` had no route at all and was dead in the schema.
   app.use("/api/settings", settingsRouter);
 

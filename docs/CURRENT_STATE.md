@@ -1,5 +1,21 @@
 # CURRENT STATE
 
+> ## ✅ MANAGER MAINTENANCE — ADDED 2026-09-11 (migration `0016`, **D-095**)
+>
+> **Gates:** backend **1349/1349 · 57 files** (was 1309/56) · frontend **1176/1176 · 53 files** (was 1143/52) · both typechecks clean · backend lint clean · frontend lint **58** (1 pre-existing error, unchanged) · `db:generate` zero diff · `drizzle-kit check` fine · migrations/snapshots/journal **17/17/17** · `next build` exit 0, **31 routes** · backend `tsc -p tsconfig.build.json` exit 0.
+>
+> The four tracking formats management already works in — **FVR**, **Transfer / Disbursement**, **APTS**, **Payment** — are now produced by the CRM at `/maintenance/*`, with management's own headings, wording and column order. They are **read projections** over `customers`, `loans`, `verifications` and `disbursements`. **No `*_tracking` table was created and none may be.**
+>
+> **Migration `0016` is additive and entirely nullable:** three master tables (`regions ▸ areas ▸ branches`) and sixteen nullable columns on `loans`, `verifications` and `disbursements`. 30 → **33 tables**, 65 → **69 FKs**, 13 → **20 CHECKs**. **Triggers stay at 7** (D-057). No backfill, no column dropped or retyped, so the previous application version still runs against it (D-090).
+>
+> **Two long-standing unknowns were settled by the supplied sheets, not by inference.** `Fund Credited to Customer` is a **credit timestamp** (`disbursements.approved_at`, guarded on `status = 'Credited'` — the same column is stamped on `→ Failed`). `Payment Status` is **not** any existing financial state: every row of the manager's Payment sheet carries a credit time and still reads `Not Received`, so it is a manager-maintained receipt flag, structurally walled off from the disbursement state machine.
+>
+> ⚠️ **What APTS and BT stand for is still not established** anywhere in the repository or the supplied material, and nothing was invented for them. Eight open questions are recorded in [MANAGER_MAINTENANCE.md](MANAGER_MAINTENANCE.md) §10.
+>
+> ⚠️ **Existing deployments must grant `maintenance.*` on the Roles screen** — `seed()` tops up non-system roles only at creation, so only `super_admin` (holding `*`) receives the new keys automatically.
+>
+> ⚠️ **Several sheet columns will be blank in current data** — `MANAGER NAME`, `REMARK` and `Customer Profile` have no UI writer anywhere in the product. They are left blank rather than filled with a plausible value (D-004).
+
 > ## ✅ WAVE 5 + WAVE 6 (CLAUDE-DOABLE) COMPLETE — 2026-09-06
 >
 > ## THE REPOSITORY IS READY FOR THE HUMAN PRODUCTION-SETUP PHASE

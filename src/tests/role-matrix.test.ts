@@ -108,6 +108,12 @@ const MATRIX: Row[] = [
   { what: "read documents", method: "get", path: "/api/documents", permission: "documents.view" },
   { what: "run the loan report", method: "get", path: "/api/reports/loans", permission: "reports.view" },
   { what: "read settings", method: "get", path: "/api/settings", permission: "settings.view" },
+  // ── manager maintenance — D-095 ──
+  { what: "read the FVR sheet", method: "get", path: "/api/maintenance/fvr", permission: "maintenance.view" },
+  { what: "read the transfer sheet", method: "get", path: "/api/maintenance/transfer", permission: "maintenance.view" },
+  { what: "read the APTS sheet", method: "get", path: "/api/maintenance/apts", permission: "maintenance.view" },
+  { what: "read the payment sheet", method: "get", path: "/api/maintenance/payment", permission: "maintenance.view" },
+  { what: "list branches", method: "get", path: "/api/maintenance/branches", permission: "maintenance.view" },
 
   // ── writes ──
   { what: "create a customer", method: "post", path: "/api/customers", permission: "customers.create", body: {} },
@@ -130,6 +136,20 @@ const MATRIX: Row[] = [
   { what: "change settings", method: "patch", path: "/api/settings", permission: "settings.edit", body: {} },
   { what: "purge from the recycle bin", method: "post", path: "/api/recycle-bin/00000000-0000-4000-8000-000000000000/permanent-delete", permission: "recycle_bin.permanent_delete", body: {} },
   { what: "restore from the recycle bin", method: "post", path: "/api/recycle-bin/00000000-0000-4000-8000-000000000000/restore", permission: "recycle_bin.restore", body: {} },
+  /*
+   * Manager maintenance writes — D-095.
+   *
+   * Every one of these is gated BEFORE the row is looked up, so a role that may
+   * not maintain gets 403 and learns nothing about whether the record exists.
+   * That ordering is what this matrix checks: never 404, never 422, for a
+   * caller who was going to be refused anyway.
+   */
+  { what: "edit an FVR checklist", method: "patch", path: "/api/maintenance/fvr/00000000-0000-4000-8000-000000000000", permission: "maintenance.edit", body: {} },
+  { what: "set a file's branch and BT lead id", method: "patch", path: "/api/maintenance/loan/00000000-0000-4000-8000-000000000000", permission: "maintenance.edit", body: {} },
+  { what: "record a manager payment status", method: "patch", path: "/api/maintenance/payment/00000000-0000-4000-8000-000000000000", permission: "maintenance.edit", body: {} },
+  { what: "create a region", method: "post", path: "/api/maintenance/regions", permission: "maintenance.manage_locations", body: {} },
+  { what: "create an area", method: "post", path: "/api/maintenance/areas", permission: "maintenance.manage_locations", body: {} },
+  { what: "create a branch", method: "post", path: "/api/maintenance/branches", permission: "maintenance.manage_locations", body: {} },
 ];
 
 let ctx: TestContext;

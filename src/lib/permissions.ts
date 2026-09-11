@@ -127,6 +127,29 @@ export const PERMISSIONS = define({
   reports: {
     view: "reports.view",
   },
+  /**
+   * MANAGER MAINTENANCE — Task MM-1, D-095.
+   *
+   * The four tracking formats management already works in (FVR, Transfer /
+   * Disbursement, APTS, Payment). Separate keys from `reports.view` on purpose:
+   * these screens are the operational sheets a manager MAINTAINS, and `edit`
+   * writes annotation columns that `reports.view` holders must not get by
+   * implication.
+   *
+   * `edit` never reaches a financial field. The routes it gates write exactly
+   * three things — the FVR checklist findings, a loan's branch and BT lead id,
+   * and a disbursement's manager receipt flag — and not one of them is read by
+   * any state machine, approval or money path.
+   *
+   * `manageLocations` is master data (Region ▸ Area ▸ Branch) and is Admin and
+   * above: a renamed branch re-labels every historical sheet that resolved
+   * through it, which is an administrative act, not an operational one.
+   */
+  maintenance: {
+    view: "maintenance.view",
+    edit: "maintenance.edit",
+    manageLocations: "maintenance.manage_locations",
+  },
   auditLogs: {
     view: "audit_logs.view",
   },
@@ -235,6 +258,10 @@ export const DEFAULT_ROLES: RoleSeed[] = [
       ...flat(PERMISSIONS.ledger),
       ...flat(PERMISSIONS.documents),
       ...flat(PERMISSIONS.reports),
+      // Manager Maintenance, including the Region ▸ Area ▸ Branch master data —
+      // D-095. Admin is "operational administration below Super Admin", which is
+      // exactly what maintaining the branch list is.
+      ...flat(PERMISSIONS.maintenance),
       PERMISSIONS.users.view,
       PERMISSIONS.users.create,
       PERMISSIONS.users.edit,
@@ -315,6 +342,16 @@ export const DEFAULT_ROLES: RoleSeed[] = [
       PERMISSIONS.documents.upload,
       PERMISSIONS.documents.delete,
       PERMISSIONS.reports.view,
+      /*
+       * These are the Manager's OWN tracking sheets — D-095. Enumerated rather
+       * than flattened, deliberately and for the reason D-074 gives for
+       * documents: `flat(PERMISSIONS.maintenance)` would hand Manager
+       * `maintenance.manage_locations` silently, and renaming a branch re-labels
+       * every historical sheet that resolves through it. Master data stays with
+       * Admin; the Manager maintains files, not the branch list.
+       */
+      PERMISSIONS.maintenance.view,
+      PERMISSIONS.maintenance.edit,
       PERMISSIONS.recycleBin.view,
       PERMISSIONS.recycleBin.restore,
     ],
